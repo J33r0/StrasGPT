@@ -14,7 +14,16 @@
 
 #ifdef PARALLEL
 #include <omp.h>
+#ifdef USE_MPI
 #include <mpi.h>
+#else
+#define MPI_SUCCESS            0
+#define MPI_COMM_WORLD         0
+#define MPI_Init(a, b)         MPI_SUCCESS
+#define MPI_Comm_rank(a, b)    (*(b) = 0, MPI_SUCCESS)
+#define MPI_Comm_size(a, b)    (*(b) = 1, MPI_SUCCESS)
+#define MPI_Finalize()         MPI_SUCCESS
+#endif
 #else
 #define MPI_SUCCESS            0
 #define MPI_COMM_WORLD         0

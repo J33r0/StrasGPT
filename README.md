@@ -18,6 +18,8 @@ make
 
 There are several other building targets:
 - `make parallel` to build the faster parallel version, that target requires mpicc compiler
+- `make android` to cross-compile a single-threaded Android binary, that target requires Clang compiler
+- `make android-parallel` to cross-compile a parallel Android binary with OpenMP (MPI disabled)
 - `make asan` for Clang's address sanitizer support and debug mode, that target requires Clang compiler
 - `make debug` for debug mode, ideal when using Valgrind
 
