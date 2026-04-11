@@ -94,9 +94,8 @@ ANDROID_TOOLCHAIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
 # On macOS hosts use: $(ANDROID_NDK)/toolchains/llvm/prebuilt/darwin-x86_64/bin
 
 android: CC        = $(ANDROID_TOOLCHAIN)/$(ANDROID_TARGET)-clang
-# Replace -march=native (host-only) with the S9's Cortex-X3 / Snapdragon 8 Gen 2 tuning
-android: OFLAGS    = -O3 -march=armv8.2-a+crypto+dotprod+fp16 \
-                     -mcpu=cortex-x3 -ffast-math -fno-finite-math-only
+# Use compatible ARMv8-a baseline for broader device support
+android: OFLAGS    = -O3 -march=armv8-a -ffast-math -fno-finite-math-only
 android: CFLAGS    = $(OFLAGS) $(WFLAGS) -I$(INC_DIR)
 android: LDFLAGS   = -lm
 android: $(OBJ)
@@ -116,10 +115,9 @@ parallel: all
 
 # Android parallel build (OpenMP; MPI is stubbed out)
 android-parallel: CC        = $(ANDROID_TOOLCHAIN)/$(ANDROID_TARGET)-clang
-android-parallel: OFLAGS    = -O3 -march=armv8.2-a+crypto+dotprod+fp16 \
-							  -mcpu=cortex-x3 -ffast-math -fno-finite-math-only
-android-parallel: CFLAGS    = $(OFLAGS) -fopenmp $(WFLAGS) -I$(INC_DIR) -DPARALLEL=1
-android-parallel: LDFLAGS   = -fopenmp -lm
+android-parallel: OFLAGS    = -O3 -march=armv8-a -ffast-math -fno-finite-math-only
+android-parallel: CFLAGS    = $(OFLAGS) $(WFLAGS) -I$(INC_DIR) -fopenmp -DPARALLEL=1
+android-parallel: LDFLAGS   = -static-openmp -fopenmp -lm
 android-parallel: $(OBJ)
 	$(CC) -o $(EXEC) $(OBJ) $(LDFLAGS)
 
