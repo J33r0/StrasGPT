@@ -22,7 +22,7 @@ GEN_C   = $(BUILD_DIR)/y.tab.c $(BUILD_DIR)/lex.json_scanner_.c
 GEN_O   = $(BUILD_DIR)/y.tab.o $(BUILD_DIR)/lex.json_scanner_.o
 OBJ     = $(OBJ_C) $(GEN_O)
 
-.PHONY: all clean android android-parallel parallel debug asan tsan
+.PHONY: all clean android android-parallel android-parallel-ws parallel parallel-ws debug asan tsan
 
 all: $(EXEC)
 
@@ -101,7 +101,7 @@ android: LDFLAGS   = -lm
 android: $(OBJ)
 	$(CC) -o $(EXEC) $(OBJ) $(LDFLAGS)
 
-# Parallel MPI + OpenMP build
+# Parallel MPI + OpenMP build (classic work-sharing, for baseline comparison)
 BREW_LIBOMP_DIR = /opt/homebrew/opt/libomp/lib
 ifneq ($(wildcard $(BREW_LIBOMP_DIR)),)
 BREW_LIBOMP_LD_FLAGS = -L$(BREW_LIBOMP_DIR) -lomp
@@ -113,12 +113,26 @@ parallel: CFLAGS = $(OFLAGS) -fopenmp $(WFLAGS) -I$(INC_DIR) -DPARALLEL=1 -DUSE_
 parallel: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -lm
 parallel: all
 
-# Android parallel build (OpenMP; MPI is stubbed out)
+# Parallel MPI + OpenMP build with work-stealing scheduler (local testing)
+parallel-ws: CC = mpicc
+parallel-ws: CFLAGS = $(OFLAGS) -fopenmp $(WFLAGS) -I$(INC_DIR) -DPARALLEL=1 -DUSE_MPI=1 -DWS_SCHEDULER=1
+parallel-ws: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -pthread -lm
+parallel-ws: all
+
+# Android parallel build (classic OpenMP work-sharing; MPI is stubbed out)
 android-parallel: CC        = $(ANDROID_TOOLCHAIN)/$(ANDROID_TARGET)-clang
 android-parallel: OFLAGS    = -O3 -march=armv8-a -ffast-math -fno-finite-math-only
 android-parallel: CFLAGS    = $(OFLAGS) $(WFLAGS) -I$(INC_DIR) -fopenmp -DPARALLEL=1
 android-parallel: LDFLAGS   = -static-openmp -fopenmp -lm
 android-parallel: $(OBJ)
+	$(CC) -o $(EXEC) $(OBJ) $(LDFLAGS)
+
+# Android parallel build with work-stealing scheduler (for tablet testing)
+android-parallel-ws: CC        = $(ANDROID_TOOLCHAIN)/$(ANDROID_TARGET)-clang
+android-parallel-ws: OFLAGS    = -O3 -march=armv8-a -ffast-math -fno-finite-math-only
+android-parallel-ws: CFLAGS    = $(OFLAGS) $(WFLAGS) -I$(INC_DIR) -fopenmp -DPARALLEL=1 -DWS_SCHEDULER=1
+android-parallel-ws: LDFLAGS = -static-openmp -fopenmp -pthread -lm
+android-parallel-ws: $(OBJ)
 	$(CC) -o $(EXEC) $(OBJ) $(LDFLAGS)
 
 # Debug build with debug symbols

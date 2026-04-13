@@ -24,6 +24,9 @@
 #define MPI_Comm_size(a, b)    (*(b) = 1, MPI_SUCCESS)
 #define MPI_Finalize()         MPI_SUCCESS
 #endif
+#ifdef WS_SCHEDULER
+#include "ws_scheduler.h"
+#endif
 #else
 #define MPI_SUCCESS            0
 #define MPI_COMM_WORLD         0
@@ -40,6 +43,11 @@ extern int json_scanner_lex_destroy(void);
 
 // Global variables for MPI rank/size we may declare extern in other files
 int mpi_rank, mpi_size;
+
+// Global work-stealing scheduler context (v3: value, not heap pointer)
+#ifdef WS_SCHEDULER
+ws_ctx_t g_ws_ctx;   /* zero-initialised; n_workers==0 means disabled */
+#endif
 
 extern unsigned long long total_more, total_zero;
 
@@ -85,8 +93,25 @@ int main(int argc, char* argv[]) {
   }
 
   // Set OpenMP parameters
+  /* v3: use PASSIVE so idle OMP threads yield rather than spin-compete with WS */
   setenv("OMP_WAIT_POLICY", "ACTIVE", 1);
   omp_set_num_threads(options->thread_count);
+
+  // Initialize work-stealing scheduler pool if enabled
+  #ifdef WS_SCHEDULER
+  const char* ws_enabled = getenv("STRASGPT_WS_ENABLE");
+  if (ws_enabled != NULL && strcmp(ws_enabled, "1") == 0) {
+    ws_ctx_init(&g_ws_ctx, options->thread_count);
+    if (g_ws_ctx.n_workers <= 0) {
+      UTIL_DIE("failed to initialise work-stealing scheduler context");
+    }
+    if (mpi_rank == 0) {
+      fprintf(stderr, "[WS_Scheduler] enabled (%d threads, weighted for big.LITTLE)\n", g_ws_ctx.n_workers);
+    }
+  } else if (mpi_rank == 0) {
+    fprintf(stderr, "[WS_Scheduler] compiled-in but disabled (set STRASGPT_WS_ENABLE=1 to enable)\n");
+  }
+  #endif
 
   #pragma omp parallel
   fprintf(
@@ -294,6 +319,14 @@ int main(int argc, char* argv[]) {
   free(logits);
   free(token);
   json_scanner_lex_destroy();
+
+  // Cleanup work-stealing scheduler pool
+  #ifdef WS_SCHEDULER
+  if (g_ws_ctx.n_workers > 0) {
+    
+    ws_ctx_destroy(&g_ws_ctx);
+  }
+  #endif
 
   if (MPI_Finalize() != MPI_SUCCESS) {
     UTIL_DIE("MPI_Finalize failed");

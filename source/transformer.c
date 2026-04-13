@@ -13,6 +13,31 @@
 #include <fcntl.h>      // for open() and O_* flags
 #include <unistd.h>     // for close()
 
+static inline float dot(
+  size_t len,
+  float activation[restrict len],
+  uint16_t weight[restrict len]
+);
+
+// Work-stealing scheduler (if enabled)
+#ifdef WS_SCHEDULER
+#include "ws_scheduler.h"
+extern ws_ctx_t g_ws_ctx;    /* v3: value not pointer, lives in strasgpt.c */
+
+typedef struct {
+  size_t dim_in;
+  uint16_t *weight;
+  float *in;
+  float *out;
+} ws_matmul_arg_t;
+
+static void ws_matmul_row(int64_t row, void *arg)
+{
+  ws_matmul_arg_t *a = (ws_matmul_arg_t *)arg;
+  a->out[row] = dot(a->dim_in, a->in, a->weight + ((size_t)row * a->dim_in));
+}
+#endif
+
 // Create a transformer_configuration_t structure from a safetensors_t
 static transformer_configuration_t* configuration_from_safetensors(
     safetensors_t* safetensors
@@ -1459,18 +1484,54 @@ static void transformer_predict_chunk(
     }
 
     // Feed-forward's fully-connected matmul (a.k.a. gate)
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      // All threads call ws_for_omp together for each token 
+      for (size_t t = 0; t < token_count; t++) {
+        #pragma omp barrier
+        ws_matmul_arg_t marg = {
+            embedding_dim,
+            &ffn_fc_weight[l][0][0],
+            ffn_norm[t],
+            ffn_fc[t]
+        };
+        ws_for_omp(&g_ws_ctx, 0, (int64_t)hidden_dim,
+                   ws_matmul_row, &marg, NULL);
+      }
+    } else
+#endif
+    {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < hidden_dim; h++) {
+          ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
+        }
       }
     }
 
     // Feed-forward's up matmul
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      // All threads call ws_for_omp together for each token
+      for (size_t t = 0; t < token_count; t++) {
+        #pragma omp barrier
+        ws_matmul_arg_t marg = {
+            embedding_dim,
+            &ffn_up_weight[l][0][0],
+            ffn_norm[t],
+            ffn_up[t]
+        };
+        ws_for_omp(&g_ws_ctx, 0, (int64_t)hidden_dim,
+                   ws_matmul_row, &marg, NULL);
+      }
+    } else
+#endif
+    {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < hidden_dim; h++) {
+          ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
+        }
       }
     }
 
@@ -1488,10 +1549,28 @@ static void transformer_predict_chunk(
     #pragma omp barrier
 
     // Final matmul to get the output of the feed-forward network
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
-        ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      // All threads call ws_for_omp together for each token
+      for (size_t t = 0; t < token_count; t++) {
+        #pragma omp barrier
+        ws_matmul_arg_t marg = {
+            hidden_dim,
+            &ffn_out_weight[l][0][0],
+            ffn_fc[t],
+            ffn_out[t]
+        };
+        ws_for_omp(&g_ws_ctx, 0, (int64_t)embedding_dim,
+                   ws_matmul_row, &marg, NULL);
+      }
+    } else
+#endif
+    {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
+        }
       }
     }
 
