@@ -36,6 +36,187 @@ static void ws_matmul_row(int64_t row, void *arg)
   ws_matmul_arg_t *a = (ws_matmul_arg_t *)arg;
   a->out[row] = dot(a->dim_in, a->in, a->weight + ((size_t)row * a->dim_in));
 }
+
+// Callback for K/V matmul in attention
+typedef struct {
+  size_t dim_in;            // embedding_dim
+  size_t head_dim;          // dimension per head
+  size_t token_count;
+  size_t head_count;        // kv_head_count
+  size_t context_len;       // context_len for VLA addressing
+  float *token_norms;       // flattened mha_norm
+  uint16_t *weights;        // flattened weight matrix
+  float *output;            // flattened k_cache / v_cache
+  size_t output_offset;     // cached_count for k/v cache
+} ws_attn_matmul_arg_t;
+
+// Callback for Q matmul (has extra q_head_per_kv_head dimension)
+typedef struct {
+  size_t dim_in;                      // embedding_dim
+  size_t head_dim;                    // dimension per head
+  size_t token_count;
+  size_t kv_head_count;
+  size_t q_head_per_kv_head_count;
+  size_t max_chunk_len;               // TRANSFORMER_CHUNK_MAX_LEN
+  float *token_norms;                 // flattened mha_norm
+  uint16_t *weights;                  // flattened weight matrix
+  float *output;                      // flattened mha_q
+} ws_attn_q_matmul_arg_t;
+
+static void ws_attn_kv_matmul(int64_t idx, void *arg)
+{
+  ws_attn_matmul_arg_t *a = (ws_attn_matmul_arg_t *)arg;
+  size_t h = idx % a->head_dim;
+  size_t t = (idx / a->head_dim) % a->token_count;
+  size_t k = (idx / a->head_dim) / a->token_count;
+  
+  uint16_t *w = a->weights + (k * a->head_dim * a->dim_in) + (h * a->dim_in);
+  float *norm = a->token_norms + (t * a->dim_in);
+  size_t out_idx = (k * a->context_len * a->head_dim) + ((a->output_offset + t) * a->head_dim) + h;
+  
+  a->output[out_idx] = dot(a->dim_in, norm, w);
+}
+
+static void ws_attn_q_matmul_worker(int64_t idx, void *arg)
+{
+  ws_attn_q_matmul_arg_t *a = (ws_attn_q_matmul_arg_t *)arg;
+  size_t h = idx % a->head_dim;
+  size_t t = (idx / a->head_dim) % a->token_count;
+  size_t q_global = (idx / a->head_dim) / a->token_count;
+  size_t kv_head = q_global / a->q_head_per_kv_head_count;
+  size_t q_head = q_global % a->q_head_per_kv_head_count;
+  
+  uint16_t *w = a->weights + (kv_head * a->q_head_per_kv_head_count * a->head_dim * a->dim_in)
+                           + (q_head * a->head_dim * a->dim_in)
+                           + (h * a->dim_in);
+                           
+  float *norm = a->token_norms + (t * a->dim_in);
+  size_t out_idx = (kv_head * a->q_head_per_kv_head_count * a->max_chunk_len * a->head_dim)
+                 + (q_head * a->max_chunk_len * a->head_dim)
+                 + (t * a->head_dim)
+                 + h;
+                 
+  a->output[out_idx] = dot(a->dim_in, norm, w);
+}
+
+// Callback for MHA output matmul: token x embedding_dim rows
+typedef struct {
+  size_t        mha_att_dim;   // q_head_count * head_dim
+  size_t        embedding_dim;
+  float        *mha_att_flat;  // [token_count][mha_att_dim]
+  uint16_t     *weights;       // mha_out_weight[l] flattened
+  float        *output;        // mha_out[t][e]
+  size_t        token_count;
+} ws_mha_out_arg_t;
+
+static void ws_mha_out_worker(int64_t idx, void *arg)
+{
+  ws_mha_out_arg_t *a = (ws_mha_out_arg_t *)arg;
+  size_t e = (size_t)idx % a->embedding_dim;
+  size_t t = (size_t)idx / a->embedding_dim;
+  float *att = a->mha_att_flat + t * a->mha_att_dim;
+  uint16_t *w = a->weights + e * a->mha_att_dim;
+  a->output[t * a->embedding_dim + e] = dot(a->mha_att_dim, att, w);
+}
+
+// Callback for multi-head attention (QK^T + softmax + weighted V sum)
+typedef struct {
+  size_t  kv_head_count;
+  size_t  q_head_per_kv;
+  size_t  token_count;
+  size_t  cached_count;
+  size_t  head_dim;
+  size_t  context_len;
+  size_t  max_chunk_len;        // TRANSFORMER_CHUNK_MAX_LEN
+  float  *mha_q_flat;           // [kv][q][t][h]
+  float  *k_cache_flat;         // [kv][context_len][h]
+  float  *v_cache_flat;         // [kv][context_len][h]
+  float  *mha_score_flat;       // [kv][q][t][context_len]
+  float  *mha_att_flat;         // [t][kv][q][h]
+} ws_attn_arg_t;
+
+static void ws_attn_worker(int64_t idx, void *arg)
+{
+  ws_attn_arg_t *a = (ws_attn_arg_t *)arg;
+  size_t t       = (size_t)idx % a->token_count;
+  size_t q_local = ((size_t)idx / a->token_count) % a->q_head_per_kv;
+  size_t k       = ((size_t)idx / a->token_count) / a->q_head_per_kv;
+
+  size_t seq_len = a->cached_count + t + 1;
+
+  // Q slice: mha_q[k][q_local][t][*]
+  float *q_vec = a->mha_q_flat
+    + k * (a->q_head_per_kv * a->max_chunk_len * a->head_dim)
+    + q_local * (a->max_chunk_len * a->head_dim)
+    + t * a->head_dim;
+
+  // score slice: mha_score[k][q_local][t][*]
+  float *score = a->mha_score_flat
+    + k * (a->q_head_per_kv * a->max_chunk_len * a->context_len)
+    + q_local * (a->max_chunk_len * a->context_len)
+    + t * a->context_len;
+
+  // k_cache slice for this kv head: k_cache[k][s][*]
+  float *kc = a->k_cache_flat + k * (a->context_len * a->head_dim);
+  float *vc = a->v_cache_flat + k * (a->context_len * a->head_dim);
+
+  // att output: mha_att[t][k][q_local][*]
+  float *att = a->mha_att_flat
+    + t * (a->kv_head_count * a->q_head_per_kv * a->head_dim)
+    + k * (a->q_head_per_kv * a->head_dim)
+    + q_local * a->head_dim;
+
+  // QK^T scores
+  float inv_sqrt = 1.0f / sqrtf((float)a->head_dim);
+  for (size_t s = 0; s < seq_len; s++) {
+    float dot_val = 0.0f;
+    float *kc_s = kc + s * a->head_dim;
+    for (size_t h = 0; h < a->head_dim; h++)
+      dot_val += q_vec[h] * kc_s[h];
+    score[s] = dot_val * inv_sqrt;
+  }
+
+  // Softmax
+  float max_val = score[0];
+  for (size_t s = 1; s < seq_len; s++)
+    if (score[s] > max_val) max_val = score[s];
+  float sum = 0.0f;
+  for (size_t s = 0; s < seq_len; s++) {
+    score[s] = expf(score[s] - max_val);
+    sum += score[s];
+  }
+  for (size_t s = 0; s < seq_len; s++)
+    score[s] /= sum;
+
+  // Weighted sum of V
+  for (size_t h = 0; h < a->head_dim; h++) att[h] = 0.0f;
+  for (size_t s = 0; s < seq_len; s++) {
+    float *vc_s = vc + s * a->head_dim;
+    for (size_t h = 0; h < a->head_dim; h++)
+      att[h] += score[s] * vc_s[h];
+  }
+}
+
+// Callback for logits classifier: vocab_len rows
+typedef struct {
+  size_t    embedding_dim;
+  float    *embedding;   // embedding[token_count - logits_count + l]
+  uint16_t *out_weight;  // out_weight[v]
+  float    *logits;      // logits[l][v] flattened
+  size_t    logits_count;
+  size_t    vocab_len;
+} ws_logits_arg_t;
+
+static void ws_logits_worker(int64_t idx, void *arg)
+{
+  ws_logits_arg_t *a = (ws_logits_arg_t *)arg;
+  size_t v = (size_t)idx % a->vocab_len;
+  size_t l = (size_t)idx / a->vocab_len;
+  a->logits[l * a->vocab_len + v] =
+      dot(a->embedding_dim,
+          a->embedding + l * a->embedding_dim,
+          a->out_weight + v * a->embedding_dim);
+}
 #endif
 
 // Create a transformer_configuration_t structure from a safetensors_t
@@ -1294,23 +1475,47 @@ static void transformer_predict_chunk(
     }
 
     // K matmul for all KV-heads, storing in the k_cache
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          k_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      int64_t total_work = (int64_t)kv_head_count * (int64_t)token_count * (int64_t)head_dim;
+      ws_attn_matmul_arg_t karg = {
+          embedding_dim, head_dim, token_count, kv_head_count, context_len,
+          (float *)mha_norm, (uint16_t *)mha_k_weight[l], (float *)k_cache[l], cached_count
+      };
+      ws_for_omp(&g_ws_ctx, 0, total_work, ws_attn_kv_matmul, &karg, NULL);
+    } else
+#endif
+    {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t h = 0; h < head_dim; h++) {
+            k_cache[l][k][cached_count + t][h] =
+                dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
+          }
         }
       }
     }
 
     // V matmul for all KV-heads, storing in the v_cache
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          v_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      int64_t total_work = (int64_t)kv_head_count * (int64_t)token_count * (int64_t)head_dim;
+      ws_attn_matmul_arg_t varg = {
+          embedding_dim, head_dim, token_count, kv_head_count, context_len,
+          (float *)mha_norm, (uint16_t *)mha_v_weight[l], (float *)v_cache[l], cached_count
+      };
+      ws_for_omp(&g_ws_ctx, 0, total_work, ws_attn_kv_matmul, &varg, NULL);
+    } else
+#endif
+    {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t h = 0; h < head_dim; h++) {
+            v_cache[l][k][cached_count + t][h] =
+                dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
+          }
         }
       }
     }
@@ -1350,13 +1555,26 @@ static void transformer_predict_chunk(
     #pragma omp barrier
 
     // Q matmul for all Q-heads
-    #pragma omp for collapse(3) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
-        for (size_t t = 0; t < token_count; t++) {
-          for (size_t h = 0; h < head_dim; h++) {
-            mha_q[k][q][t][h] =
-                dot(embedding_dim, mha_norm[t], mha_q_weight[l][k][q][h]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      int64_t total_qheads = (int64_t)kv_head_count * (int64_t)q_head_per_kv_head_count;
+      int64_t total_work = total_qheads * (int64_t)token_count * (int64_t)head_dim;
+      ws_attn_q_matmul_arg_t qarg = {
+          embedding_dim, head_dim, token_count, kv_head_count, q_head_per_kv_head_count, TRANSFORMER_CHUNK_MAX_LEN,
+          (float *)mha_norm, (uint16_t *)mha_q_weight[l], (float *)mha_q
+      };
+      ws_for_omp(&g_ws_ctx, 0, total_work, ws_attn_q_matmul_worker, &qarg, NULL);
+    } else
+#endif
+    {
+      #pragma omp for collapse(3) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            for (size_t h = 0; h < head_dim; h++) {
+              mha_q[k][q][t][h] =
+                  dot(embedding_dim, mha_norm[t], mha_q_weight[l][k][q][h]);
+            }
           }
         }
       }
@@ -1398,10 +1616,27 @@ static void transformer_predict_chunk(
     }
 
     // Multihead attention. iterate over all Q-heads
-    #pragma omp for collapse(3) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
-        for (size_t t = 0; t < token_count; t++) {
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      ws_attn_arg_t aarg = {
+          kv_head_count, q_head_per_kv_head_count,
+          token_count, cached_count, head_dim,
+          context_len, TRANSFORMER_CHUNK_MAX_LEN,
+          (float *)mha_q, (float *)k_cache[l],
+          (float *)v_cache[l], (float *)mha_score,
+          (float *)mha_att
+      };
+      int64_t total_heads = (int64_t)kv_head_count
+                          * (int64_t)q_head_per_kv_head_count
+                          * (int64_t)token_count;
+      ws_for_omp(&g_ws_ctx, 0, total_heads, ws_attn_worker, &aarg, NULL);
+    } else
+#endif
+    {
+      #pragma omp for collapse(3) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
           // Calculate the attention score: QKˆT / sqrt(head_dim)
           // Here we don't use mask but a triangular loop (no compute
           // for future tokens)
@@ -1445,19 +1680,34 @@ static void transformer_predict_chunk(
         }
       }
     }
+    /* end WS else for attention */}
 
     #pragma omp barrier
 
     // Final matmul to get the output of the attention
     // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
     // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
-        mha_out[t][e] =
-            dot(q_head_count * head_dim,
-                ((float (*)[q_head_count * head_dim])mha_att)[t],
-                mha_out_weight[l][e]);
+#ifdef WS_SCHEDULER
+    if (g_ws_ctx.n_workers > 0) {
+      ws_mha_out_arg_t oarg = {
+          q_head_count * head_dim, embedding_dim,
+          (float *)mha_att, (uint16_t *)mha_out_weight[l],
+          (float *)mha_out, token_count
+      };
+      ws_for_omp(&g_ws_ctx, 0,
+                 (int64_t)token_count * (int64_t)embedding_dim,
+                 ws_mha_out_worker, &oarg, NULL);
+    } else
+#endif
+    {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          mha_out[t][e] =
+              dot(q_head_count * head_dim,
+                  ((float (*)[q_head_count * head_dim])mha_att)[t],
+                  mha_out_weight[l][e]);
+        }
       }
     }
 
@@ -1488,7 +1738,6 @@ static void transformer_predict_chunk(
     if (g_ws_ctx.n_workers > 0) {
       // All threads call ws_for_omp together for each token 
       for (size_t t = 0; t < token_count; t++) {
-        #pragma omp barrier
         ws_matmul_arg_t marg = {
             embedding_dim,
             &ffn_fc_weight[l][0][0],
@@ -1514,7 +1763,6 @@ static void transformer_predict_chunk(
     if (g_ws_ctx.n_workers > 0) {
       // All threads call ws_for_omp together for each token
       for (size_t t = 0; t < token_count; t++) {
-        #pragma omp barrier
         ws_matmul_arg_t marg = {
             embedding_dim,
             &ffn_up_weight[l][0][0],
@@ -1553,7 +1801,6 @@ static void transformer_predict_chunk(
     if (g_ws_ctx.n_workers > 0) {
       // All threads call ws_for_omp together for each token
       for (size_t t = 0; t < token_count; t++) {
-        #pragma omp barrier
         ws_matmul_arg_t marg = {
             hidden_dim,
             &ffn_out_weight[l][0][0],
@@ -1669,13 +1916,30 @@ static void transformer_predict_chunk(
   }
 
   // Classifier into logits
-  #pragma omp for collapse(2)
-  for (size_t l = 0; l < logits_count; l++) {
-    for (size_t v = 0; v < vocabulary_len; v++) {
-      logits[l][v] =
-          dot(embedding_dim,
-              embedding[l + token_count - logits_count],
-              out_weight[v]);
+#ifdef WS_SCHEDULER
+  if (g_ws_ctx.n_workers > 0) {
+    ws_logits_arg_t larg = {
+        embedding_dim,
+        (float *)embedding + (token_count - logits_count) * embedding_dim,
+        (uint16_t *)out_weight,
+        (float *)logits,
+        logits_count,
+        vocabulary_len
+    };
+    ws_for_omp(&g_ws_ctx, 0,
+               (int64_t)logits_count * (int64_t)vocabulary_len,
+               ws_logits_worker, &larg, NULL);
+  } else
+#endif
+  {
+    #pragma omp for collapse(2)
+    for (size_t l = 0; l < logits_count; l++) {
+      for (size_t v = 0; v < vocabulary_len; v++) {
+        logits[l][v] =
+            dot(embedding_dim,
+                embedding[l + token_count - logits_count],
+                out_weight[v]);
+      }
     }
   }
 }

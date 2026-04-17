@@ -27,3 +27,8 @@ strasgpt
 # OS-specific
 .DS_Store
 Thumbs.db
+
+bench_*
+*.py
+*.log
+*.pdf

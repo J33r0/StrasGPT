@@ -1,4 +1,6 @@
-#pragma once
+#ifndef WS_SCHEDULER_H
+#define WS_SCHEDULER_H
+
 #include <stdatomic.h>
 #include <stdint.h>
 #include <omp.h>
@@ -50,3 +52,5 @@ void ws_for_omp(ws_ctx_t *ctx, int64_t begin, int64_t end,
 #ifdef __cplusplus
 }
 #endif
+
+#endif // WS_SCHEDULER_H
