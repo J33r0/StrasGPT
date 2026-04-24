@@ -116,7 +116,7 @@ parallel: all
 # Parallel MPI + OpenMP build with work-stealing scheduler (local testing)
 parallel-ws: CC = mpicc
 parallel-ws: CFLAGS = $(OFLAGS) -fopenmp $(WFLAGS) -I$(INC_DIR) -DPARALLEL=1 -DUSE_MPI=1 -DWS_SCHEDULER=1
-parallel-ws: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -pthread -lm
+parallel-ws: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -lm
 parallel-ws: all
 
 # Android parallel build (classic OpenMP work-sharing; MPI is stubbed out)
@@ -131,7 +131,7 @@ android-parallel: $(OBJ)
 android-parallel-ws: CC        = $(ANDROID_TOOLCHAIN)/$(ANDROID_TARGET)-clang
 android-parallel-ws: OFLAGS    = -O3 -march=armv8-a -ffast-math -fno-finite-math-only
 android-parallel-ws: CFLAGS    = $(OFLAGS) $(WFLAGS) -I$(INC_DIR) -fopenmp -DPARALLEL=1 -DWS_SCHEDULER=1
-android-parallel-ws: LDFLAGS = -static-openmp -fopenmp -pthread -lm
+android-parallel-ws: LDFLAGS = -static-openmp -fopenmp -lm
 android-parallel-ws: $(OBJ)
 	$(CC) -o $(EXEC) $(OBJ) $(LDFLAGS)
 

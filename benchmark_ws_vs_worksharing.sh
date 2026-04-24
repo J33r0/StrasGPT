@@ -119,7 +119,7 @@ extract_decode_tps() {
 }
 
 cpulist_to_mask() {
-  # Convert list like "0-2,4,6-7" to decimal bitmask for Android taskset.
+  # Convert list like "0-2,4,6-7" to a hex bitmask (without 0x prefix).
   list="$1"
   mask=0
   oldifs="$IFS"
@@ -141,7 +141,7 @@ cpulist_to_mask() {
     esac
   done
   IFS="$oldifs"
-  printf "0x%x\n" "$mask"
+  printf "%x\n" "$mask"
 }
 
 run_one() {
@@ -155,23 +155,20 @@ run_one() {
   echo "[RUN] mode=$mode threads=$threads repeat=$rep"
 
   cmd_exit=0
-  use_taskset_c=0
   taskset_mask=""
   if [ -n "$CPU_LIST" ]; then
-    if taskset --help 2>&1 | grep -q -- ' -c '; then
-      use_taskset_c=1
-    else
-      taskset_mask="$(cpulist_to_mask "$CPU_LIST")"
-    fi
+    taskset_mask="$(cpulist_to_mask "$CPU_LIST")"
   fi
 
   if [ "$mode" = "ws_on" ]; then
     if [ -n "$CPU_LIST" ]; then
-      if [ "$use_taskset_c" -eq 1 ]; then
+      if taskset -c "$CPU_LIST" sh -c ':' >/dev/null 2>&1; then
         if ! env STRASGPT_WS_ENABLE=1 taskset -c "$CPU_LIST" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
           cmd_exit=1
         fi
-      elif ! env STRASGPT_WS_ENABLE=1 taskset "$taskset_mask" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
+      elif env STRASGPT_WS_ENABLE=1 taskset "$taskset_mask" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
+        :
+      elif ! env STRASGPT_WS_ENABLE=1 taskset "0x$taskset_mask" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
         cmd_exit=1
       fi
     elif ! STRASGPT_WS_ENABLE=1 "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
@@ -179,11 +176,13 @@ run_one() {
     fi
   else
     if [ -n "$CPU_LIST" ]; then
-      if [ "$use_taskset_c" -eq 1 ]; then
+      if taskset -c "$CPU_LIST" sh -c ':' >/dev/null 2>&1; then
         if ! env STRASGPT_WS_ENABLE=0 taskset -c "$CPU_LIST" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
           cmd_exit=1
         fi
-      elif ! env STRASGPT_WS_ENABLE=0 taskset "$taskset_mask" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
+      elif env STRASGPT_WS_ENABLE=0 taskset "$taskset_mask" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
+        :
+      elif ! env STRASGPT_WS_ENABLE=0 taskset "0x$taskset_mask" "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then
         cmd_exit=1
       fi
     elif ! STRASGPT_WS_ENABLE=0 "$BIN" -m "$MODEL" -f "$PROMPT_FILE" -n "$STEPS" -t "$threads" $EXTRA_ARGS > "$log_file" 2>&1; then

@@ -32,3 +32,5 @@ bench_*
 *.py
 *.log
 *.pdf
+*.sh
+

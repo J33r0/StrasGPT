@@ -6,29 +6,31 @@ set -eu
 # Predefined sets:
 #   0-2, 1-6, 7, 0-7
 #
+# Each model is benchmarked with step counts 17 and 57.
+#
 # Example:
 #   ./benchmark_two_models_core_sets.sh \
 #     --model-a ~/model_zoo/Qwen3-0.6B \
 #     --model-b ~/model_zoo/Llama3.2-1B \
 #     --prompt-file test/prompts/goldilocks_8.txt \
-#     --steps 17 \
 #     --repeats 3 \
 #     --out-dir bench_dual_models
 
-BENCH_SCRIPT="./benchmark_ws_vs_worksharing.sh"
-BIN="./strasgpt"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+BENCH_SCRIPT="$SCRIPT_DIR/benchmark_ws_vs_worksharing.sh"
+BIN="$SCRIPT_DIR/strasgpt"
 MODEL_A=""
 MODEL_B=""
 PROMPT_FILE=""
 STEPS="17"
-REPEATS="3"
+STEP_COUNTS="17 57"
+REPEATS="15"
 THREADS_MIN="1"
-THREADS_MAX=""
 OUT_DIR="bench_dual_models"
 EXTRA_ARGS=""
 
 # Keep these predefined unless you intentionally edit this file.
-CORE_SETS="0-2 1-6 7 0-7"
+CORE_SETS="7 3-6 0-2 0-7"
 
 usage() {
   cat <<EOF
@@ -42,17 +44,14 @@ Required:
 Optional:
   --bench-script <path>    Benchmark launcher (default: ./benchmark_ws_vs_worksharing.sh)
   --bin <path>             Binary path (default: ./strasgpt)
-  --steps <n>              -n value (default: 17)
   --repeats <n>            Repeats per (mode,thread) (default: 3)
   --threads-min <n>        Min thread count (default: 1)
-  --threads-max <n>        Force max thread count for all CPU sets.
-                           If omitted, max threads = number of CPUs in each set.
   --out-dir <dir>          Output directory root (default: bench_dual_models)
   --extra-args "..."       Extra args passed as-is to strasgpt
   --help                   Show this help
 
 CPU sets used:
-  0-2, 1-6, 7, 0-7
+  0-2, 3-6, 7, 0-7
 EOF
 }
 
@@ -63,10 +62,8 @@ while [ "$#" -gt 0 ]; do
     --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
     --bench-script) BENCH_SCRIPT="$2"; shift 2 ;;
     --bin) BIN="$2"; shift 2 ;;
-    --steps) STEPS="$2"; shift 2 ;;
     --repeats) REPEATS="$2"; shift 2 ;;
     --threads-min) THREADS_MIN="$2"; shift 2 ;;
-    --threads-max) THREADS_MAX="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --extra-args) EXTRA_ARGS="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -84,8 +81,8 @@ if [ -z "$MODEL_A" ] || [ -z "$MODEL_B" ] || [ -z "$PROMPT_FILE" ]; then
   exit 1
 fi
 
-if [ ! -x "$BENCH_SCRIPT" ]; then
-  echo "Error: benchmark script not found or not executable: $BENCH_SCRIPT" >&2
+if [ ! -f "$BENCH_SCRIPT" ]; then
+  echo "Error: benchmark script not found: $BENCH_SCRIPT" >&2
   exit 1
 fi
 
@@ -144,11 +141,7 @@ run_model() {
   mkdir -p "$model_dir"
 
   for cpu_set in $CORE_SETS; do
-    auto_tmax="$(count_cpu_list "$cpu_set")"
-    tmax="$auto_tmax"
-    if [ -n "$THREADS_MAX" ]; then
-      tmax="$THREADS_MAX"
-    fi
+    tmax="$(count_cpu_list "$cpu_set")"
 
     if [ "$tmax" -lt "$THREADS_MIN" ]; then
       echo "[WARN] Skipping model=$model_label cpu_set=$cpu_set because threads-max ($tmax) < threads-min ($THREADS_MIN)"
@@ -159,36 +152,41 @@ run_model() {
     out_subdir="$model_dir/cpu_${cpu_tag}"
     mkdir -p "$out_subdir"
 
-    echo "[RUN] model=$model_label cpu_set=$cpu_set threads=${THREADS_MIN}..${tmax} repeats=$REPEATS"
+    for steps in $STEP_COUNTS; do
+      step_dir="$out_subdir/steps_${steps}"
+      mkdir -p "$step_dir"
 
-    if [ -n "$EXTRA_ARGS" ]; then
-      if ! "$BENCH_SCRIPT" \
-        --bin "$BIN" \
-        --model "$model_path" \
-        --prompt-file "$PROMPT_FILE" \
-        --steps "$STEPS" \
-        --threads-min "$THREADS_MIN" \
-        --threads-max "$tmax" \
-        --repeats "$REPEATS" \
-        --out-dir "$out_subdir" \
-        --cpu-list "$cpu_set" \
-        --extra-args "$EXTRA_ARGS"; then
-        RUN_FAILED=1
+      echo "[RUN] model=$model_label steps=$steps cpu_set=$cpu_set threads=${THREADS_MIN}..${tmax} repeats=$REPEATS"
+
+      if [ -n "$EXTRA_ARGS" ]; then
+        if ! sh "$BENCH_SCRIPT" \
+          --bin "$BIN" \
+          --model "$model_path" \
+          --prompt-file "$PROMPT_FILE" \
+          --steps "$steps" \
+          --threads-min "$THREADS_MIN" \
+          --threads-max "$tmax" \
+          --repeats "$REPEATS" \
+          --out-dir "$step_dir" \
+          --cpu-list "$cpu_set" \
+          --extra-args "$EXTRA_ARGS"; then
+          RUN_FAILED=1
+        fi
+      else
+        if ! sh "$BENCH_SCRIPT" \
+          --bin "$BIN" \
+          --model "$model_path" \
+          --prompt-file "$PROMPT_FILE" \
+          --steps "$steps" \
+          --threads-min "$THREADS_MIN" \
+          --threads-max "$tmax" \
+          --repeats "$REPEATS" \
+          --out-dir "$step_dir" \
+          --cpu-list "$cpu_set"; then
+          RUN_FAILED=1
+        fi
       fi
-    else
-      if ! "$BENCH_SCRIPT" \
-        --bin "$BIN" \
-        --model "$model_path" \
-        --prompt-file "$PROMPT_FILE" \
-        --steps "$STEPS" \
-        --threads-min "$THREADS_MIN" \
-        --threads-max "$tmax" \
-        --repeats "$REPEATS" \
-        --out-dir "$out_subdir" \
-        --cpu-list "$cpu_set"; then
-        RUN_FAILED=1
-      fi
-    fi
+    done
   done
 }
 

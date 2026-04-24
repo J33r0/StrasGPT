@@ -1486,7 +1486,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h++) {
@@ -1509,7 +1509,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h++) {
@@ -1522,7 +1522,7 @@ static void transformer_predict_chunk(
 
     // Per-head normalization of K, if applicable
     if (mha_k_norm_weight) {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
           rmsnorm(
@@ -1537,7 +1537,7 @@ static void transformer_predict_chunk(
     }
 
     // RoPE K for all KV-heads: complex-valued rotate K in each head
-    #pragma omp for collapse(2) schedule(static) nowait
+    #pragma omp for collapse(2) schedule(dynamic) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
@@ -1567,7 +1567,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(3) schedule(static) nowait
+      #pragma omp for collapse(3) schedule(dynamic) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
@@ -1582,7 +1582,7 @@ static void transformer_predict_chunk(
 
     // Per-head normalization of Q, if applicable
     if (mha_q_norm_weight) {
-      #pragma omp for collapse(3) schedule(static) nowait
+      #pragma omp for collapse(3) schedule(dynamic) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
@@ -1599,7 +1599,7 @@ static void transformer_predict_chunk(
     }
 
     // RoPE Q for all Q-heads: complex-valued rotate Q in each head
-    #pragma omp for collapse(3) schedule(static) nowait
+    #pragma omp for collapse(3) schedule(dynamic) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
@@ -1633,7 +1633,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(3) schedule(static) nowait
+      #pragma omp for collapse(3) schedule(dynamic) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
@@ -1700,7 +1700,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t t = 0; t < token_count; t++) {
         for (size_t e = 0; e < embedding_dim; e++) {
           mha_out[t][e] =
@@ -1712,7 +1712,7 @@ static void transformer_predict_chunk(
     }
 
     // Residual connection back into x
-    #pragma omp for collapse(2) schedule(static) nowait
+    #pragma omp for collapse(2) schedule(dynamic) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += mha_out[t][e];
@@ -1750,7 +1750,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < hidden_dim; h++) {
           ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
@@ -1775,7 +1775,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < hidden_dim; h++) {
           ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
@@ -1784,7 +1784,7 @@ static void transformer_predict_chunk(
     }
 
     // SwiGLU non-linearity
-    #pragma omp for collapse(2) schedule(static) nowait
+    #pragma omp for collapse(2) schedule(dynamic) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < hidden_dim; e++) {
         // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
@@ -1813,7 +1813,7 @@ static void transformer_predict_chunk(
     } else
 #endif
     {
-      #pragma omp for collapse(2) schedule(static) nowait
+      #pragma omp for collapse(2) schedule(dynamic) nowait
       for (size_t t = 0; t < token_count; t++) {
         for (size_t e = 0; e < embedding_dim; e++) {
           ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
@@ -1822,7 +1822,7 @@ static void transformer_predict_chunk(
     }
 
     // Residual connection
-    #pragma omp for collapse(2) schedule(static) nowait
+    #pragma omp for collapse(2) schedule(dynamic) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += ffn_out[t][e];
