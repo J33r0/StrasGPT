@@ -32,5 +32,7 @@ bench_*
 *.py
 *.log
 *.pdf
+*.png
 *.sh
-
+performance/
+results/
